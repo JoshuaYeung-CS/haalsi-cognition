@@ -1,0 +1,732 @@
+---
+title: "HAALSI Hackathon: Risk Factors for Cognitive Impairment"
+subtitle: "Waves 1-3 longitudinal analysis"
+author: "Joshua Yeung"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+params:
+  data_path: "HAALSI_W1-3_Longitudinal_Dataset.dta"
+  rebuild: false
+---
+
+```{r setup, include=FALSE}
+# error = TRUE lets the report knit even while some of your code is unfinished.
+# Each chunk with an error shows the message in the report; fix it and Knit again.
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, error = TRUE)
+
+pkgs <- c("haven", "dplyr", "tidyr", "ggplot2", "broom", "lme4", "lmerTest", "knitr", "splines")
+missing <- setdiff(pkgs, rownames(installed.packages()))
+if (length(missing)) install.packages(missing, repos = "https://cloud.r-project.org")
+suppressPackageStartupMessages({
+  library(haven); library(dplyr); library(tidyr); library(ggplot2)
+  library(broom); library(lme4); library(lmerTest)
+})
+
+# Helpers that print model results in a consistent table
+show_lm <- function(model, pattern) {
+  tidy(model, conf.int = TRUE) |> filter(grepl(pattern, term)) |>
+    select(term, estimate, conf.low, conf.high, p.value) |>
+    mutate(across(where(is.numeric), ~ round(.x, 3))) |> knitr::kable()
+}
+show_glm <- function(model, pattern) {   # odds ratios (or rate ratios for Poisson)
+  tidy(model, conf.int = TRUE, exponentiate = TRUE) |> filter(grepl(pattern, term)) |>
+    select(term, estimate, conf.low, conf.high, p.value) |>
+    mutate(across(where(is.numeric), ~ round(.x, 3))) |> knitr::kable()
+}
+show_lmer <- function(model, pattern) {
+  co <- summary(model)$coefficients
+  co <- co[grepl(pattern, rownames(co)), , drop = FALSE]
+  data.frame(term = rownames(co), estimate = co[, "Estimate"],
+             conf.low = co[, "Estimate"] - 1.96 * co[, "Std. Error"],
+             conf.high = co[, "Estimate"] + 1.96 * co[, "Std. Error"],
+             p.value = co[, ncol(co)], row.names = NULL) |>
+    mutate(across(where(is.numeric), ~ round(.x, 3))) |> knitr::kable()
+}
+```
+
+# How to use this file {-}
+
+1. Download `HAALSI_W1-3_Longitudinal_Dataset.dta` from the HAALSI Harvard Dataverse and put it
+   in the same folder as this file. The name must match exactly (rename it if your browser
+   added something like `(1)` or `_2`).
+2. Click **Knit**. The first run builds a cleaned dataset (`..._long.rds`); later runs reuse it.
+3. **Data cleaning** and **About the data** are done for you. Read them, but don't change them.
+4. In each question, look for `___` (three underscores). Replace each one with code, then Knit again.
+   Lines starting with `# HINT` tell you what goes there.
+   Until you fill a blank, that chunk shows `Error: unexpected input` in the report. That's expected.
+   Later chunks that use your result will also show errors until the earlier blank is done.
+5. Write your answers in the *Interpretation* lines under each question.
+6. Do not submit or share the `.dta` or `.rds` files.
+
+# Data cleaning
+
+This section reads the HAALSI file you downloaded from Harvard Dataverse, keeps the variables we need, recodes them and saves a
+cleaned file with one row per person per wave. It only runs if the cleaned file doesn't exist
+yet, or if you render with `params = list(rebuild = TRUE)`.
+
+**Coding rules used below:** −97 (refused), −98 (don't know) and −99 (empty) are missing;
+yes/no variables are 1 = Yes, 2 = No and are recoded to 1/0; sex is 1 = Male, 2 = Female.
+
+```{r cleaning, error = FALSE}
+dta_path <- params$data_path
+rds_path <- paste0(tools::file_path_sans_ext(basename(dta_path)), "_long.rds")
+
+if (params$rebuild || !file.exists(rds_path)) {
+  if (!file.exists(dta_path)) {
+    stop("Cannot find '", dta_path, "'. Download it from the HAALSI Harvard Dataverse, ",
+         "put it in the same folder as this .Rmd file and check the file name matches exactly.")
+  }
+
+  # 1. Variables. "?" is replaced by the wave number.
+  wave_vars <- c(
+    age = "w?c_rage_calc", marital_status = "w?c_bd_mar", hhsize = "w?c_hhsize",
+    hhnum = "w?c_hhnum", wealth = "w?c_wealthindex", asset = "w?c_hh_assetindex",
+    employment = "w?c_ep_employed",
+    memory = "w?cn001", concentration = "w?cn002", learning = "w?cn003",
+    cesd = "w?c_cd_cesd", bmi = "w?c_bs_bmi", bmi_category = "w?c_bs_bmicat",
+    hypertension_diag = "w?c_cm_hypertension_srdiag", htn_on_med_raw = "w?cm005",
+    diabetes_diag = "w?c_cm_diabetes_srdiag", dm_on_med_raw = "w?cm010",
+    adls_walk = "w?c_pf_diff_walk", adls_dress = "w?c_pf_diff_dress",
+    adls_bath = "w?c_pf_diff_bath", adls_eat = "w?c_pf_diff_eat",
+    adls_toilet = "w?c_pf_diff_toilet",
+    systolic_bp = "w?c_bs_mean_sys", diastolic_bp = "w?c_bs_mean_dia", glucose = "w?c_bs_glucose",
+    smoking = "w?cm059", alcohol = "w?cm068",
+    status = "w?status", int_year = "w?c_int_year", int_month = "w?c_int_month",
+    # cognition (Waves 2-3 have summary scores; Wave 1 is built from item-level data below)
+    imrec1 = "w?c_cn_imrec1", delrec = "w?c_cn_delrec", orient_sum = "w?cn214"
+  )
+  fixed_vars <- c("w2c_rsex", "w1c_bd_educ4", "w1c_bd_country")
+  w1_cog_items <- c("w1cn013", paste0("w1cn007s", 1:10), paste0("w1cn012s", 1:10),
+                    paste0("w1cn01", 4:7))
+
+  wanted <- c("prim_key", fixed_vars, w1_cog_items,
+              unlist(lapply(1:3, function(w) sub("?", w, wave_vars, fixed = TRUE))))
+  all_names <- names(read_dta(dta_path, n_max = 0))
+  raw <- read_dta(dta_path, col_select = all_of(intersect(wanted, all_names)))
+  raw <- zap_labels(zap_missing(raw))
+
+  # 2. Helpers
+  neg_to_na <- function(x) { x <- as.numeric(x); x[x < 0] <- NA; x }
+  yes_no    <- function(x) { x <- as.numeric(x)
+    case_when(x == 1 ~ 1, x %in% c(0, 2) ~ 0, TRUE ~ NA_real_) }
+
+  # 3. Wave 1 cognition from item-level data.
+  #    Word recall: one column per word, value > 0 = word recalled.
+  #    Wave 1 had one immediate-recall trial, so trial 1 is used in every wave.
+  w1_recall <- function(stem) {
+    m <- as.matrix(raw[, paste0(stem, "s", 1:10)]); m[is.na(m)] <- 0
+    n <- rowSums(m > 0)
+    n[rowSums(m == -97) > 0] <- NA            # refused
+    n[is.na(raw$w1cn013)] <- NA               # cognition section not done (e.g., proxy)
+    n
+  }
+  orient_w1 <- sapply(paste0("w1cn01", 4:7), function(v) {
+    x <- as.numeric(raw[[v]]); case_when(x == 1 ~ 1, x %in% c(2, -98) ~ 0, TRUE ~ NA_real_) })
+  w1_cog <- tibble(prim_key = raw$prim_key, wave = 1,
+                   imrec1_w1 = w1_recall("w1cn007"), delrec_w1 = w1_recall("w1cn012"),
+                   orient_w1 = rowSums(orient_w1))
+
+  # 4. Wide -> long
+  long <- lapply(1:3, function(w) {
+    cols <- sub("?", w, wave_vars, fixed = TRUE)
+    out  <- tibble(prim_key = raw$prim_key, wave = w)
+    for (nm in names(wave_vars)) {
+      out[[nm]] <- if (cols[[nm]] %in% names(raw)) as.numeric(raw[[cols[[nm]]]]) else NA_real_
+    }
+    out
+  }) |> bind_rows() |>
+    left_join(w1_cog, by = c("prim_key", "wave")) |>
+    mutate(imrec1     = if_else(wave == 1, imrec1_w1, imrec1),
+           delrec     = if_else(wave == 1, delrec_w1, delrec),
+           orient_sum = if_else(wave == 1, orient_w1, orient_sum)) |>
+    select(-imrec1_w1, -delrec_w1, -orient_w1)
+
+  fixed <- tibble(
+    prim_key = raw$prim_key,
+    sex = case_when(raw$w2c_rsex == 1 ~ 1, raw$w2c_rsex == 2 ~ 0),     # 1 = Male, 0 = Female
+    education_category = neg_to_na(raw$w1c_bd_educ4),
+    born_moz = case_when(raw$w1c_bd_country == 2 ~ 1, raw$w1c_bd_country == 1 ~ 0)
+  )
+
+  # 5. Recode
+  long <- long |>
+    left_join(fixed, by = "prim_key") |>
+    mutate(
+      status = if_else(wave == 1, 1, status),
+      across(c(age, marital_status, hhsize, hhnum, wealth, employment, memory, concentration,
+               learning, cesd, bmi, bmi_category, systolic_bp, diastolic_bp, glucose,
+               imrec1, delrec, orient_sum), neg_to_na),
+      employment = if_else(wave == 3 & employment == 0, 2, employment),
+      across(c(hypertension_diag, diabetes_diag, smoking, alcohol, htn_on_med_raw,
+               dm_on_med_raw), yes_no),
+      across(starts_with("adls_"), ~ case_when(.x %in% c(1, 3) ~ 1, .x == 2 ~ 0, TRUE ~ NA_real_))
+    )
+
+  # 6. Derived variables
+  long <- long |>
+    mutate(
+      htn_group = factor(case_when(hypertension_diag == 0 ~ "No hypertension",
+                                   htn_on_med_raw == 1    ~ "Hypertension, treated",
+                                   hypertension_diag == 1 ~ "Hypertension, untreated"),
+                         levels = c("No hypertension", "Hypertension, untreated",
+                                    "Hypertension, treated")),
+      dm_group  = factor(case_when(diabetes_diag == 0 ~ "No diabetes",
+                                   dm_on_med_raw == 1 ~ "Diabetes, treated",
+                                   diabetes_diag == 1 ~ "Diabetes, untreated"),
+                         levels = c("No diabetes", "Diabetes, untreated", "Diabetes, treated")),
+      adl_count = adls_walk + adls_dress + adls_bath + adls_eat + adls_toilet,
+      any_adl   = as.numeric(adl_count > 0),
+      int_date  = int_year + (int_month - 0.5) / 12
+    ) |>
+    select(-htn_on_med_raw, -dm_on_med_raw)
+
+  # Objective cognition: each test z-scored to Wave 1, averaged, re-standardized to Wave 1.
+  ref <- filter(long, wave == 1)
+  zref <- function(x, r) (x - mean(r, na.rm = TRUE)) / sd(r, na.rm = TRUE)
+  long <- long |>
+    mutate(cog_raw = (zref(orient_sum, ref$orient_sum) + zref(imrec1, ref$imrec1) +
+                        zref(delrec, ref$delrec)) / 3)
+  long <- long |>
+    mutate(objective_cognition_z = zref(cog_raw, cog_raw[wave == 1])) |> select(-cog_raw)
+  cut20 <- quantile(long$objective_cognition_z[long$wave == 1], 0.20, na.rm = TRUE)
+  long  <- long |> mutate(low_cognition = as.numeric(objective_cognition_z < cut20))
+
+  # Wealth: asset index in SD units (Wave 1 scale); CES-D z-scored within wave
+  long <- long |>
+    mutate(asset_sd = zref(asset, asset[wave == 1])) |>
+    group_by(wave) |>
+    mutate(cesd_z = (cesd - mean(cesd, na.rm = TRUE)) / sd(cesd, na.rm = TRUE)) |>
+    ungroup()
+
+  # Time since baseline (Wave 1) interview, in years
+  long <- long |>
+    group_by(prim_key) |>
+    mutate(years_since_bl = int_date - int_date[wave == 1][1]) |>
+    ungroup()
+
+  # Labelled factors
+  long <- long |>
+    mutate(
+      sex_f       = factor(sex, 0:1, c("Female", "Male")),
+      education_f = factor(education_category, 1:4,
+                           c("No formal", "Some primary", "Some secondary", "Secondary+")),
+      marital_f   = factor(marital_status, 0:3,
+                           c("Never married", "Separated/divorced", "Widowed", "Married")),
+      hhsize_f    = factor(hhsize, 0:3, c("Alone", "2 people", "3-6 people", "7+ people")),
+      wealth_f    = factor(wealth, 1:5, c("Q1 (poorest)", "Q2", "Q3", "Q4", "Q5 (richest)")),
+      employment_f   = factor(employment, 1:3, c("Employed", "Not working", "Homemaker")),
+      bmi_category_f = factor(bmi_category, 0:3, c("Underweight", "Normal", "Overweight", "Obese"))
+    ) |>
+    arrange(prim_key, wave)
+
+  saveRDS(long, rds_path)
+}
+
+haalsi <- readRDS(rds_path)
+cat(rds_path, ":", nrow(haalsi), "person-waves,", n_distinct(haalsi$prim_key), "participants\n")
+```
+
+# About the data
+
+* `objective_cognition_z` is available in **all three waves**. It averages orientation (0–4),
+  immediate word recall (trial 1, 0–10) and delayed word recall (0–10), each scaled to Wave 1.
+  0 = the Wave 1 average; 1 = one Wave 1 standard deviation. `low_cognition` = below the Wave 1
+  20th percentile.
+* Cross-sectional questions use **Wave 1** (`w1`), the largest sample with full covariates.
+  Change over time uses all three waves (`cog_long`), with `years_since_bl` = years since the
+  Wave 1 interview (about 3 years to Wave 2, about 6 to Wave 3).
+* Wealth: `wealth_f` = asset-index quintile; `asset_sd` = the continuous asset index in SD units.
+* CES-D is the 8-item scale in Wave 1 (0–8) and the 20-item scale in Waves 2–3. `cesd_z` is
+  standardized within wave. We use the Wave 1 score.
+* `htn_group` and `dm_group` compare no condition / untreated / treated. Treatment comes from the
+  "on treatment" questions, *not* from `_srtrt` (which is a narrower definition of the condition).
+* Self-reported cognition is coded so higher = worse (memory: 1 = excellent … 5 = poor;
+  concentration and learning: 1 = no difficulty … 5 = extreme).
+* Average scores rise slightly over follow-up because people get better at repeated tests, and
+  about 1 in 5 participants died by Wave 3. Interpret **differences in change between groups**,
+  not the average change.
+
+```{r about, error = FALSE}
+haalsi |>
+  group_by(wave) |>
+  summarise(completed = sum(status == 1, na.rm = TRUE),
+            with_cognition = sum(!is.na(objective_cognition_z)),
+            mean_years_since_bl = round(mean(years_since_bl[status == 1], na.rm = TRUE), 1),
+            mean_cognition = round(mean(objective_cognition_z, na.rm = TRUE), 2)) |>
+  knitr::kable()
+
+w1 <- filter(haalsi, wave == 1) |> mutate(bmi_category_f = relevel(bmi_category_f, ref = "Normal"))
+
+# Baseline (Wave 1) characteristics, used as predictors of change
+baseline <- w1 |>
+  transmute(prim_key, age_bl = age, age10_bl = (age - 60) / 10, sex_f, education_f, born_moz,
+            marital_f, hhsize_bl_f = hhsize_f, wealth_bl = wealth, asset_sd_bl = asset_sd,
+            employment_bl_f = employment_f, cesd_bl_z = cesd_z,
+            htn_bl = hypertension_diag, htn_group_bl = htn_group, dm_bl = diabetes_diag,
+            bmi_bl = bmi, bmi_cat_bl_f = bmi_category_f, smoking_bl = smoking, alcohol_bl = alcohol)
+
+# One row per person per wave with cognition, plus baseline characteristics
+cog_long <- haalsi |>
+  filter(!is.na(objective_cognition_z), !is.na(years_since_bl)) |>
+  select(prim_key, wave, years = years_since_bl, objective_cognition_z, low_cognition) |>
+  left_join(baseline, by = "prim_key")
+
+cat("Wave 1 sample:", nrow(w1), " | person-waves with cognition:", nrow(cog_long), "\n")
+```
+
+# Question 1: Which intervention could have the greatest benefit?
+
+## 1a. Is household wealth associated with cognition? (worked example)
+
+This section is complete. Use it as a model for the rest of the questions.
+
+**Confounders.** Age and sex influence wealth and cognition, and education comes before
+wealth in the life course. Avoid variables that wealth itself could change (BMI, hypertension,
+depression), since they may be mechanisms.
+
+```{r q1a}
+# Level of cognition: wealth quintiles vs the poorest, and per SD of the asset index
+m1a_cat <- lm(objective_cognition_z ~ wealth_f + age + sex_f + education_f, data = w1)
+show_lm(m1a_cat, "wealth")
+
+m1a_sd <- lm(objective_cognition_z ~ asset_sd + age + sex_f + education_f, data = w1)
+show_lm(m1a_sd, "asset")
+
+# Risk of low cognition: odds ratios
+m1a_low <- glm(low_cognition ~ asset_sd + age + sex_f + education_f, family = binomial, data = w1)
+show_glm(m1a_low, "asset")
+
+# Rate of change: random intercept and slope per person.
+# Covariates interact with time so they adjust the slope as well as the level.
+m1a_slope <- lmer(objective_cognition_z ~ years * (asset_sd_bl + age10_bl + sex_f + education_f) +
+                    (1 + years | prim_key), data = cog_long)
+show_lmer(m1a_slope, "asset")
+```
+
+*Interpretation:* Cognition rises steadily with wealth. Compared with the poorest quintile, Q2 scores
+0.09 SD higher and the richest quintile 0.31 SD higher (95% CI 0.23 to 0.39), after age, sex and
+education. Each 1 SD of the asset index is worth 0.11 SD of cognition and lowers the odds of low
+cognition by about 30% (OR 0.70, 0.63 to 0.78). Wealth does not predict the rate of change
+(`years:asset_sd_bl` = 0.002 SD/year, CI -0.004 to 0.007): it is tied to the level of cognition,
+not how fast it changes over 6 years.
+
+*Try:* add `log(hhnum)` (household size) or `marital_f`. Is each a confounder or a mediator?
+
+## 1b. Is hypertension associated with cognition?
+
+Compare no hypertension, untreated hypertension and treated hypertension (`htn_group`).
+
+```{r q1b}
+# Level of cognition
+# HINT: put the exposure where the ___ is. Which confounders? Is wealth a confounder here?
+m1b <- lm(objective_cognition_z ~ htn_group + age + sex_f + education_f + wealth_f, data = w1)
+show_lm(m1b, "htn")
+
+```
+
+```{r q1b-low}
+# Risk of low cognition
+# HINT: outcome = low_cognition; logistic regression uses family = binomial
+m1b_low <- glm(low_cognition ~ htn_group + age + sex_f + education_f + wealth_f, family = binomial, data = w1)
+show_glm(m1b_low, "htn")
+
+```
+
+```{r q1b-slope}
+# Rate of change
+# HINT: copy m1a_slope above and replace asset_sd_bl with htn_group_bl
+m1b_slope <- lmer(objective_cognition_z ~ years * (htn_group_bl + age10_bl + sex_f + education_f + asset_sd_bl) +
+                    (1 + years | prim_key), data = cog_long)
+show_lmer(m1b_slope, "htn")
+```
+
+*Interpretation:* Untreated hypertension looks just like no hypertension (+0.01 SD, CI -0.04 to
+0.07; OR 1.01). Treated hypertension scores 0.16 SD *higher* (CI 0.10 to 0.22), with lower odds of
+low cognition (OR 0.61, 0.50 to 0.76). That is very unlikely to be the pills alone. People who get
+diagnosed and treated are the ones who reach clinics, follow up and have the means and health
+literacy to do so (healthy-user and access-to-care confounding). Wealth and education only partly
+capture that. The treated group's slope is slightly steeper (-0.020 SD/year, CI -0.033 to -0.007),
+consistent with regression to the mean from a higher starting point, not harm. This is not causal
+evidence that treatment protects cognition. The fair comparison would be a trial or a
+treatment-access natural experiment.
+
+## 1c. Is depression associated with objective and subjective cognition?
+
+All outcomes are standardized so the coefficients can be compared. For subjective outcomes a
+positive coefficient means more reported difficulty; for objective cognition a negative
+coefficient means worse performance.
+
+```{r q1c}
+w1_std <- w1 |>
+  mutate(across(c(objective_cognition_z, memory, concentration, learning),
+                ~ as.numeric(scale(.x)), .names = "{.col}_std"))
+outcomes <- c("objective_cognition_z_std", "memory_std", "concentration_std", "learning_std")
+
+```
+
+```{r q1c-loop}
+q1c <- lapply(outcomes, function(y) {
+  # HINT: the exposure is the standardized CES-D score. Use the same name in both blanks.
+  f <- reformulate(c("cesd_z", "age", "sex_f", "education_f", "wealth_f"), response = y)
+  tidy(lm(f, data = w1_std), conf.int = TRUE) |> filter(term == "cesd_z") |> mutate(outcome = y)
+}) |> bind_rows()
+
+q1c |> select(outcome, estimate, conf.low, conf.high, p.value) |>
+  mutate(across(where(is.numeric), ~ round(.x, 3))) |> knitr::kable()
+
+```
+
+```{r q1c-low}
+# YOUR TURN: fit a logistic model of low_cognition on cesd_z (same covariates) and show the OR.
+m1c_low <- glm(low_cognition ~ cesd_z + age + sex_f + education_f + wealth_f, family = binomial, data = w1)
+show_glm(m1c_low, "cesd")
+```
+
+*Interpretation:* A 1 SD higher CES-D score goes with 0.11 SD *lower* objective cognition but
+0.17 to 0.20 SD *more* self-reported difficulty (memory 0.20, concentration 0.18, learning 0.17),
+so the subjective link is almost twice the objective one. Each SD of CES-D also raises the odds of
+low cognition by 26% (OR 1.26, 1.17 to 1.36). Depressed people report more cognitive trouble than
+their test scores show, so self-reports used for screening would over-flag people with depressive
+symptoms. Depression and cognition can also cause each other (reverse causation).
+
+## 1d. Putting it together: how much could each intervention reduce low cognition?
+
+`prev_shift()` sets everyone's exposure to a post-intervention value, predicts each person's
+probability of low cognition and compares the average with the baseline. The cash-transfer
+scenario is done. Write the other two and justify every assumption.
+
+```{r q1d}
+prev_shift <- function(model, change) {
+  d0 <- model.frame(model) |> as.data.frame()
+  d1 <- change(d0)
+  c(before = mean(predict(model, d0, type = "response")),
+    after  = mean(predict(model, d1, type = "response")))
+}
+
+scenarios <- list(
+  # Cash transfer: assets up by 0.5 SD (justify using the Old Age Pension literature)
+  "Cash transfer: assets +0.5 SD" =
+    prev_shift(m1a_low, function(d) mutate(d, asset_sd = asset_sd + 0.5))
+)
+```
+
+```{r q1d-yours}
+scenarios <- c(scenarios, list(
+  # HINT: use m1b_low. Change everyone in "Hypertension, untreated" to "Hypertension, treated".
+  "HTN care: treat all untreated hypertension" =
+    prev_shift(m1b_low, function(d) mutate(d, htn_group = replace(htn_group, htn_group == "Hypertension, untreated", "Hypertension, treated"))),
+
+  # HINT: use m1c_low. Lower cesd_z by 0.5, but only for people with cesd_z > 0 (symptomatic).
+  "Psychotherapy: CES-D -0.5 SD if symptomatic" =
+    prev_shift(m1c_low, function(d) mutate(d, cesd_z = ifelse(cesd_z > 0, cesd_z - 0.5, cesd_z)))
+))
+```
+
+```{r q1d-table}
+
+do.call(rbind, scenarios) |> as.data.frame() |>
+  mutate(change_pct_points = round(100 * (after - before), 2),
+         before = round(100 * before, 1), after = round(100 * after, 1)) |>
+  knitr::kable(col.names = c("Low cognition before (%)", "After (%)", "Change (percentage points)"))
+```
+
+*Discussion:*
+
+* **Results:** with about 20% of people in low cognition at baseline, a 0.5 SD rise in assets
+  lowers predicted prevalence by 2.2 percentage points (19.9% to 17.8%). Treating all untreated
+  hypertension lowers it by 2.1 points. Reducing CES-D by 0.5 SD in symptomatic people lowers it
+  by 0.6 points. The depression row starts at 19.8% instead of 19.9% because people missing
+  CES-D drop out of that model.
+* **Is +0.5 SD plausible?** South Africa's Old Age Pension is large relative to household income
+  in rural areas. Case (2001) and Duflo (2003) show it changed health and nutrition across the
+  household, and Ardington et al. (2009) show it changed household composition and labour. So a
+  sustained transfer could plausibly move durable assets by a meaningful fraction of an SD. But an
+  asset index moves slowly, and 0.5 SD is optimistic for a short program.
+* **What would make these causal?** No unmeasured confounding of exposure and cognition, correct
+  model form, and an intervention that moves the exposure the same way the natural variation
+  did. **We trust the hypertension estimate least.** Untreated hypertension shows no deficit, so
+  the whole "benefit" comes from comparing treated with untreated people, who differ in access
+  to care and health behaviour (see 1b). The wealth estimate is also confounded (childhood
+  circumstances, lifelong cognitive ability) but has a quasi-experimental literature behind it.
+* **Most promising:** a cash transfer / financial-security intervention. It has the largest
+  modelled effect, the most credible mechanism and existing natural-experiment evidence. It also
+  helps the whole household. Hypertension care is worth doing for heart and stroke reasons, but
+  these data do not show it protects cognition. Other approaches: education is the strongest
+  correlate of cognitive level here, so investing in schooling helps future cohorts. Hearing and
+  vision correction and treating depression for its own sake are also candidates.
+
+# Question 2: Is self-reported memory associated with objective cognition?
+
+```{r q2}
+w1 |>
+  select(objective_cognition_z, memory, concentration, learning) |>
+  cor(use = "pairwise.complete.obs", method = "spearman") |>
+  round(2) |> knitr::kable(caption = "Spearman correlations (Wave 1)")
+
+```
+
+```{r q2-model}
+# YOUR TURN 1: regress objective_cognition_z on factor(memory) plus age, sex_f, education_f
+m2 <- lm(objective_cognition_z ~ factor(memory) + age + sex_f + education_f, data = w1)
+show_lm(m2, "memory")
+
+```
+
+```{r q2-screen}
+# YOUR TURN 2: how well does rating memory "fair" or "poor" (memory >= 4) identify people with
+# low_cognition? Make a 2x2 table and calculate sensitivity and specificity.
+# HINT: table(w1$memory >= 4, w1$low_cognition)
+tab2 <- table(fair_or_poor = w1$memory >= 4, low_cognition = w1$low_cognition)
+tab2
+c(sensitivity = tab2["TRUE", "1"] / sum(tab2[, "1"]),
+  specificity = tab2["FALSE", "0"] / sum(tab2[, "0"]),
+  ppv = tab2["TRUE", "1"] / sum(tab2["TRUE", ])) |> round(3)
+```
+
+*Interpretation:* Self-rated memory is clearly related to test scores. Each step worse goes with
+lower cognition, and "poor" memory scores 1.18 SD below "excellent". But the Spearman correlation is
+only -0.38. As a screen, rating memory fair or poor catches just **37%** of people with low
+cognition (sensitivity 0.37), so it misses nearly two in three. Only 40% of those it flags are
+actually low (PPV 0.40, against a 20% base rate). Specificity is 0.86. It is a weak substitute for
+a short objective test, though it is better than nothing where testing is impossible.
+
+# Question 3: Is diabetes associated with objective and subjective cognition?
+
+```{r q3}
+# YOUR TURN: repeat the Q1c loop with dm_group as the exposure.
+# HINT: copy the q1c code, replace "cesd_z" with "dm_group", and filter with grepl("dm_group", term)
+q3 <- lapply(outcomes, function(y) {
+  f <- reformulate(c("dm_group", "age", "sex_f", "education_f", "wealth_f"), response = y)
+  tidy(lm(f, data = w1_std), conf.int = TRUE) |> filter(grepl("dm_group", term)) |> mutate(outcome = y)
+}) |> bind_rows()
+
+q3 |> select(outcome, term, estimate, conf.low, conf.high, p.value) |>
+  mutate(across(where(is.numeric), ~ round(.x, 3))) |> knitr::kable()
+w1 |> count(dm_group) |> knitr::kable()
+```
+
+*Interpretation:* Yes. Objective cognition is not different with diabetes (untreated -0.07 SD,
+CI -0.17 to 0.03; treated -0.02, CI -0.13 to 0.09). But people with diabetes rate their memory
+worse (+0.13 SD in both groups, both CIs above 0) and report more learning difficulty (untreated
++0.12). Diabetes affects how people perceive their cognition more than measured performance, which
+could reflect fatigue, low mood or symptoms of high or low blood sugar. Only 249 treated and 310
+untreated people (407 missing), so confidence intervals are wide and the treated-vs-untreated
+contrast can't be interpreted. We can't rule out a small objective effect.
+
+# Question 4: Is BMI category associated with objective cognition?
+
+`bmi_category_f` has Normal as the reference group.
+
+```{r q4}
+# YOUR TURN 1: regress objective_cognition_z on bmi_category_f with your chosen confounders
+m4 <- lm(objective_cognition_z ~ bmi_category_f + age + sex_f + education_f + wealth_f, data = w1)
+show_lm(m4, "bmi")
+
+```
+
+```{r q4-plot}
+w1_cc <- w1 |> drop_na(objective_cognition_z, bmi, age, sex_f, education_f, wealth_f)
+ggplot(filter(w1_cc, bmi > 12, bmi < 55), aes(bmi, objective_cognition_z)) +
+  geom_smooth(method = "loess") + labs(x = "BMI", y = "Objective cognition (z)")
+```
+
+```{r q4-spline}
+# YOUR TURN 2: is the association with continuous BMI non-linear?
+# HINT: compare lm(... ~ bmi + ...) with lm(... ~ splines::ns(bmi, 3) + ...) using anova().
+# Both models must use the same rows, so use data = w1_cc.
+m4_lin <- lm(objective_cognition_z ~ bmi + age + sex_f + education_f + wealth_f, data = w1_cc)
+m4_ns  <- lm(objective_cognition_z ~ splines::ns(bmi, 3) + age + sex_f + education_f + wealth_f, data = w1_cc)
+anova(m4_lin, m4_ns)
+
+# Moderation by hypertension (HIV status is not in this file)
+m4_int <- lm(objective_cognition_z ~ bmi_category_f * hypertension_diag + age + sex_f + education_f + wealth_f,
+             data = w1)
+anova(lm(objective_cognition_z ~ bmi_category_f + hypertension_diag + age + sex_f + education_f + wealth_f,
+         data = model.frame(m4_int)), m4_int)
+```
+
+*Interpretation:* Relative to normal BMI, underweight people score 0.20 SD lower (CI -0.31 to
+-0.09), overweight 0.13 SD higher and obese 0.20 SD higher. Within the observed range the
+association rises with BMI, but a spline fits better than a straight line (F = 11.4, p < 0.001):
+the curve is steep at low BMI and flattens higher up. Being thin at older ages is often a
+*consequence* of illness, food insecurity or early dementia (reverse causation), and being heavy
+can mark household resources. So this should not be read as "weight gain protects the brain".
+Moderation by hypertension is null (interaction F = 0.88, p = 0.45).
+
+# Question 5: Are hypertension and diabetes associated with functional disability?
+
+```{r q5}
+w1_adl <- w1 |>
+  mutate(comorbidity = factor(case_when(
+    hypertension_diag == 0 & diabetes_diag == 0 ~ "Neither",
+    hypertension_diag == 1 & diabetes_diag == 0 ~ "Hypertension only",
+    hypertension_diag == 0 & diabetes_diag == 1 ~ "Diabetes only",
+    hypertension_diag == 1 & diabetes_diag == 1 ~ "Both"),
+    levels = c("Neither", "Hypertension only", "Diabetes only", "Both")))
+w1_adl |> count(comorbidity) |> knitr::kable()
+
+adl_outcomes <- c("adls_walk", "adls_dress", "adls_bath", "adls_eat", "adls_toilet", "any_adl")
+sapply(w1_adl[adl_outcomes], mean, na.rm = TRUE) |> round(3)   # prevalence: some are rare
+
+```
+
+```{r q5-models}
+# YOUR TURN 1: for each ADL outcome, fit a logistic model with comorbidity + confounders
+# and keep the comorbidity odds ratios.
+# HINT: same structure as the Q1c loop; use glm(f, family = binomial, data = w1_adl)
+# and tidy(..., exponentiate = TRUE)
+q5 <- lapply(adl_outcomes, function(y) {
+  f <- reformulate(c("comorbidity", "age", "sex_f", "education_f", "wealth_f"), response = y)
+  tidy(glm(f, family = binomial, data = w1_adl), conf.int = TRUE, exponentiate = TRUE) |>
+    filter(grepl("comorbidity", term)) |> mutate(outcome = y)
+}) |> bind_rows()
+
+q5 |> select(outcome, term, estimate, conf.low, conf.high, p.value) |>
+  mutate(across(where(is.numeric), ~ round(.x, 3))) |> knitr::kable()
+
+```
+
+```{r q5-interaction}
+# YOUR TURN 2: is having both conditions worse than expected from each alone?
+# HINT: glm(any_adl ~ hypertension_diag * diabetes_diag + ..., family = binomial) and look at
+# the interaction term.
+m5_int <- glm(any_adl ~ hypertension_diag * diabetes_diag + age + sex_f + education_f + wealth_f,
+              family = binomial, data = w1_adl)
+show_glm(m5_int, "hypertension|diabetes")
+```
+
+*Interpretation:* Hypertension alone shows no excess ADL difficulty (any ADL OR 1.00, 0.78 to 1.29).
+Diabetes alone is imprecise (only 117 people). Having **both** about doubles the odds of any ADL
+difficulty (OR 2.02, 1.42 to 2.85), with similar results for walking (2.07) and toileting (2.19)
+and a weaker one for dressing (1.83). Bathing and eating are not clearly raised. The eating row for
+"Diabetes only" is unusable (OR 0, CI to 18,000: no events in that cell). The interaction term (OR
+1.49, 0.75 to 3.15) is underpowered: the data fit a combined effect at least as large as the
+two conditions added together, but can't tell whether it is more than that. Comorbidity may also
+stand in for longer disease duration or complications.
+
+# Question 6: Which baseline factors predict cognitive decline?
+
+Each factor's interaction with `years` shows whether it predicts faster (negative) or slower
+(positive) change, in SD per year.
+
+```{r q6}
+# YOUR TURN: add the other baseline predictors inside the parentheses.
+# Available: age10_bl, sex_f, education_f, asset_sd_bl, cesd_bl_z, htn_bl, dm_bl,
+#            bmi_cat_bl_f, smoking_bl, alcohol_bl
+m6 <- lmer(objective_cognition_z ~ years * (age10_bl + sex_f + education_f + asset_sd_bl + cesd_bl_z + htn_bl + dm_bl +
+                                         bmi_cat_bl_f + smoking_bl + alcohol_bl) + (1 + years | prim_key),
+           data = cog_long)
+show_lmer(m6, "^years")
+```
+
+*Interpretation:*
+
+* Average scores *rise* by 0.08 SD/year (people improve with retesting), so read every
+  interaction as a smaller or larger gain, not true decline. Older age predicts a smaller gain
+  (-0.013 SD/year per decade). More education predicts a smaller gain (secondary+ -0.08 SD/year).
+  Higher baseline depressive symptoms predict a slightly *larger* gain (+0.009). Wealth,
+  hypertension, diabetes, BMI, smoking and alcohol do not predict the slope.
+* The education result is a ceiling, practice-effect and regression-to-the-mean artefact. More
+  educated people start near the top of a short test and have less room to improve. The CES-D
+  result is the mirror image: people tested on a bad day bounce back. Neither should be read as
+  education being harmful or depression being protective.
+* Dropout and death (about 1 in 5 by Wave 3) remove people who were declining fastest. The
+  survivors look better than the cohort, which hides real decline in high-risk groups.
+* The random-slope variance is close to zero ("singular fit"), so most variation is in levels,
+  not slopes. Fixed effects are what we interpret.
+
+# Question 7: Who is most resilient to cognitive decline?
+
+**Approach A:** interactions with time, focused on possible protective factors.
+
+```{r q7a}
+# YOUR TURN: same as m6, using education_f, asset_sd_bl, employment_bl_f, cesd_bl_z, htn_bl,
+# dm_bl, bmi_bl inside the parentheses, and age10_bl + sex_f outside.
+m7 <- lmer(objective_cognition_z ~ age10_bl + sex_f +
+             years * (education_f + asset_sd_bl + employment_bl_f + cesd_bl_z + htn_bl + dm_bl + bmi_bl) +
+             (1 + years | prim_key), data = cog_long)
+show_lmer(m7, "^years")
+```
+
+**Approach B:** among people with cognition at Waves 1 and 3, predict Wave 3 cognition from
+Wave 1 cognition, age, sex and follow-up time. People in the top 20% of residuals (doing better
+than expected) are labelled resilient.
+
+```{r q7b}
+resil <- cog_long |>
+  filter(wave %in% c(1, 3)) |>
+  select(prim_key, wave, objective_cognition_z, years) |>
+  pivot_wider(names_from = wave, values_from = c(objective_cognition_z, years)) |>
+  rename(cog_w1 = objective_cognition_z_1, cog_w3 = objective_cognition_z_3, years_w3 = years_3) |>
+  filter(!is.na(cog_w1), !is.na(cog_w3)) |>
+  left_join(baseline, by = "prim_key")
+
+m_resid <- lm(cog_w3 ~ cog_w1 + age_bl + I(age_bl^2) + sex_f + years_w3, data = resil)
+resil$resid <- NA
+resil$resid[as.numeric(rownames(model.frame(m_resid)))] <- resid(m_resid)
+resil <- resil |> mutate(resilient = as.numeric(resid >= quantile(resid, 0.8, na.rm = TRUE)))
+
+```
+
+```{r q7b-compare}
+# YOUR TURN 1: compare baseline characteristics of resilient people with everyone else
+# HINT: group_by(resilient) |> summarise(n = n(), mean(asset_sd_bl, na.rm = TRUE), ...)
+resil |> filter(!is.na(resilient)) |> group_by(resilient) |>
+  summarise(n = n(), age = mean(age_bl, na.rm = TRUE), cog_w1 = mean(cog_w1, na.rm = TRUE),
+            assets_sd = mean(asset_sd_bl, na.rm = TRUE), cesd_z = mean(cesd_bl_z, na.rm = TRUE),
+            hypertension = mean(htn_bl, na.rm = TRUE), diabetes = mean(dm_bl, na.rm = TRUE),
+            bmi = mean(bmi_bl, na.rm = TRUE)) |>
+  mutate(across(where(is.numeric), ~ round(.x, 2))) |> knitr::kable()
+
+resil |> filter(!is.na(resilient)) |> with(table(education_f, resilient)) |>
+  prop.table(2) |> round(2) |> knitr::kable(caption = "Education by resilience (column %)")
+
+```
+
+```{r q7b-model}
+# YOUR TURN 2: logistic regression of resilient on the possible protective factors
+m7b <- glm(resilient ~ education_f + asset_sd_bl + employment_bl_f + cesd_bl_z + htn_bl + dm_bl + bmi_bl,
+           family = binomial, data = resil)
+show_glm(m7b, "^(education|asset|employment|cesd|htn|dm|bmi)")
+```
+
+*Interpretation:* In Approach B, wealth is the clearest marker of resilience. Each SD of assets
+raises the odds of doing better than expected by 25% (OR 1.25, 1.14 to 1.38), and some secondary
+education helps too (OR 1.43, 1.07 to 1.89), though not monotonically (secondary+ OR 0.75,
+CI 0.50 to 1.10). Depression, hypertension, diabetes, BMI and employment
+do not distinguish the groups. **The two approaches disagree on wealth:** in Approach A,
+wealth does not change the slope (0.002, p = 0.60), and education looks harmful there for the
+ceiling reasons above. Resilient people started *lower* at Wave 1 (0.00 vs 0.18 SD). Because one
+test score is measured with error, the residual approach still partly picks up people whose
+Wave 1 score was unluckily low (regression to the mean). Everyone here survived and stayed in to
+Wave 3, so the comparison group is already healthier than the cohort. Calling this "resilience"
+is generous: it is "outperforming one's predicted score among survivors".
+
+# Conclusions
+
+* **Most promising: financial security.** Wealth has a graded link to cognitive level (richest vs
+  poorest quintile +0.31 SD), and +0.5 SD of assets cuts predicted low cognition by about 2
+  percentage points (about 11% of cases). It also predicts outperforming one's expected score by
+  Wave 3. Hypertension treatment shows a similar modelled effect, but it rests entirely on a
+  treated-vs-untreated contrast we don't trust. Depression treatment gives about 0.6 points.
+* **Biggest threats:** for wealth, lifelong confounding (childhood conditions and cognitive
+  ability shape both wealth and test scores). For hypertension, healthy-user and access-to-care
+  bias. For depression, reverse causation. For all change analyses, practice effects and dropout
+  or death.
+* **Other approaches:** education is the strongest correlate of cognitive level. Diabetes
+  mainly changes *perceived* cognition, so patient-centred diabetes care matters. Comorbid
+  hypertension plus diabetes doubles functional-limitation odds, which argues for joint chronic
+  disease management.
+* **A better study:** a regression discontinuity at pension eligibility age (60) comparing
+  cognition just above and below the threshold, or a randomized cash transfer with cognitive
+  follow-up.
+
+# Session info
+
+```{r session}
+sessionInfo()
+```

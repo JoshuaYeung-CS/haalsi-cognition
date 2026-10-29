@@ -1,0 +1,94 @@
+\documentclass[10pt]{article}
+\usepackage[margin=0.55in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage[hidelinks]{hyperref}
+\usepackage{titlesec}\titlespacing*{\section}{0pt}{6pt}{3pt}
+\setlist{nosep,leftmargin=1.2em}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{4pt}
+\pagestyle{empty}
+
+\begin{document}
+
+{\Large\bfseries HAALSA Hackathon --- results brief}\hfill Sat Oct 24, 10 AM--5 PM ET
+
+Zoom: \url{https://bostonu.zoom.us/j/96853036635} \quad ID 968 5303 6635 \quad passcode 421911.\\
+Folder \texttt{research/haalsi-hackathon/}: untouched starter \texttt{HAALSI\_hackathon\_student.Rmd};\\
+filled copy with all answers \texttt{HAALSI\_hackathon\_joshua.Rmd} / \texttt{.html}.
+
+\section*{Pitch: Question 1 --- which intervention could cut cognitive impairment most?}
+
+\textbf{Data.} HAALSI, rural Agincourt, South Africa: 5{,}059 adults aged 40+ at Wave 1, three
+waves over about 6 years (12{,}092 person-waves with cognition). \textbf{Outcome}:
+\texttt{objective\_cognition\_z} (orientation + immediate + delayed word recall, Wave 1 SD units)
+and \texttt{low\_cognition} (below the Wave 1 20th percentile). \textbf{Confounders}: age, sex,
+education (all come before the exposures). Wealth is added for hypertension and depression. BMI,
+hypertension and depression are \emph{not} adjusted for in the wealth model because they may be
+mechanisms.
+\textbf{Methods}: linear regression (level), logistic regression (low cognition), linear mixed
+model with random intercept and slope (change), then predicted prevalence under each intervention.
+
+\begin{center}\small
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Exposure & Level (SD) & OR low cognition & Modelled change in low cognition\\
+\midrule
+Wealth, per 1 SD assets & $+0.11$ (0.08, 0.14) & 0.70 (0.63, 0.78) & $+0.5$ SD assets: 19.9\% $\to$ 17.8\% ($-2.2$ pts)\\
+Hypertension, untreated & $+0.01$ ($-0.04$, 0.07) & 1.01 (0.84, 1.23) & \\
+Hypertension, treated & $+0.16$ (0.10, 0.22) & 0.61 (0.50, 0.76) & treat all untreated: $-2.1$ pts\\
+Depression, per 1 SD CES-D & $-0.11$ ($-0.13$, $-0.08$) & 1.26 (1.17, 1.36) & $-0.5$ SD if symptomatic: $-0.6$ pts\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{How to read it.}
+\begin{itemize}
+\item \textbf{Wealth}: graded --- richest vs poorest quintile $+0.31$ SD. A 0.5 SD rise in assets
+  removes about 11\% of low-cognition cases. It does \emph{not} change the 6-year slope
+  (0.002 SD/yr).
+\item \textbf{Hypertension}: untreated looks the same as none. The whole ``benefit'' is treated
+  vs untreated people, who differ in clinic access, health literacy and resources
+  (healthy-user bias). This is the estimate we trust least.
+\item \textbf{Depression}: linked to self-reported difficulty almost twice as strongly
+  (0.17--0.20 SD) as to test scores ($-0.11$). Self-reports over-flag depressed people.
+\end{itemize}
+\textbf{Verdict}: financial security (cash transfer / Old Age Pension) is the most promising. It has
+the largest modelled effect, the most credible mechanism and existing natural-experiment evidence
+(Case 2001; Duflo 2003; Ardington et al.\ 2009), and it benefits the whole household.
+
+\textbf{Limitations} (pick 1--2): (1) confounding by lifelong factors --- childhood
+circumstances and cognitive ability shape both wealth and scores. (2) Healthy-user bias in the
+treated-hypertension contrast. (3) Practice effects and dropout or death (about 1 in 5 by Wave 3):
+scores \emph{rise} 0.08 SD/yr on retest, so ``decline'' analyses compare gains. (4) A short
+cognitive test with ceiling effects.
+
+\textbf{Implication / better study}: a regression discontinuity at pension-eligibility age 60, or a
+randomized cash transfer with cognitive follow-up.
+
+\section*{Backup findings (if the team picks another question)}
+\begin{itemize}
+\item \textbf{Q2 self-rated memory}: Spearman $\rho=-0.38$. ``Fair/poor'' catches only 37\% of
+  low-cognition cases (specificity 0.86, PPV 0.40). Related, but a poor screen.
+\item \textbf{Q3 diabetes}: objective cognition no different ($-0.07$, CI crosses 0), but worse
+  self-rated memory ($+0.13$ SD). Only 249 treated --- imprecise.
+\item \textbf{Q4 BMI}: underweight $-0.20$ SD, obese $+0.20$ SD, non-linear (spline $p<0.001$).
+  Likely reverse causation (illness or poverty causes thinness). No moderation by hypertension
+  ($p=0.45$).
+\item \textbf{Q5 ADLs}: hypertension \emph{and} diabetes together $\approx$ doubles odds of any ADL
+  difficulty (OR 2.02, 1.42--2.85). Either alone is not clearly raised. Interaction underpowered.
+\item \textbf{Q6/Q7 change}: education and older age predict \emph{smaller practice gains} (a
+  ceiling and regression-to-the-mean artefact, not harm). In the residual approach, wealth
+  predicts outperforming one's expected score (OR 1.25/SD), but not in the slope model --- the two
+  approaches disagree.
+\end{itemize}
+
+\textbf{Slide outline (5--6 slides)}: question \& why it matters $\to$ data + variables + why
+those confounders $\to$ methods $\to$ the table above $\to$ verdict + limitations $\to$ better
+study. Required citation on the final slide: \emph{HAALSI is sponsored by the National Institute on
+Aging (5P01AG041710-05) and conducted by the Harvard Center for Population and Development Studies
+in partnership with Wits University.}
+
+\end{document}

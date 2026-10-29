@@ -1,0 +1,17 @@
+# HAALSI data: covered by the data use agreement, never redistributed
+*.dta
+*.rds
+.rlib/
+.Rhistory
+.RData
+# Organizer-provided template and materials
+HAALSI_hackathon_student.Rmd
+HAALSI_hackathon_student.html
+materials/
+# Personal notes
+HAALSI_gameplan.*
+# LaTeX build output
+*.aux
+*.log
+*.out
+.DS_Store
