@@ -1,6 +1,6 @@
 # Money, medicine or therapy? Cognitive impairment in rural South Africa
 
-My entry for the HAALSI data hackathon (October 24, 2026). The question: which of three
+My analysis for the HAALSI data hackathon (October 24, 2026), drafted before teams were assigned and used as the base of our presentation. The question: which of three
 interventions (cash transfers, hypertension treatment or psychotherapy for depression) could do
 the most to reduce cognitive impairment among older adults in Agincourt, South Africa?
 
